@@ -379,3 +379,7 @@ textarea { resize: vertical; min-height: 80px; }
 
 /* ── Small buttons ───────────────────────────────────────────────────────── */
 .btn-xs { padding: 3px 8px; font-size: 11px; margin-right: 4px; }
+
+/* ── Clickable table rows ────────────────────────────────────────────────── */
+.team-row:hover { background: var(--surface-2); }
+.team-task-row:hover { background: var(--surface-2); }

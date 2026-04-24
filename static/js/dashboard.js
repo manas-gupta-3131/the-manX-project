@@ -156,72 +156,250 @@ function renderPortfolioTab(root) {
 /* ── Teams tab ──────────────────────────────────────────────────────────────── */
 function renderTeamsTab(root) {
   const me = window.__me;
-  root.insertAdjacentHTML('beforeend', `<div class="section-title">Teams</div>`);
+  root.insertAdjacentHTML('beforeend', `
+    <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+      Teams
+      <span style="font-size:12px;color:var(--text-muted);font-weight:400">Click a team row to view details</span>
+    </div>
+  `);
 
   if (__teams.length === 0) {
     root.insertAdjacentHTML('beforeend', `<div class="empty-state">No teams yet.</div>`);
     return;
   }
 
-  const table = `
+  const tbody = __teams.map(t => {
+    const members = __users.filter(u => u.team_id === t.id);
+    const activeTasks = 0;
+    return `
+      <tr class="team-row" onclick="openTeamDetail(${t.id})" style="cursor:pointer" title="Click to open team">
+        <td>
+          <div style="display:flex;align-items:center;gap:10px">
+            <div class="avatar" style="background:var(--primary);flex-shrink:0">${t.name.slice(0,2).toUpperCase()}</div>
+            <div>
+              <div style="font-weight:600;color:var(--primary)">${t.name}</div>
+              <div style="font-size:11px;color:var(--text-muted)">${t.description || 'No description'}</div>
+            </div>
+          </div>
+        </td>
+        <td>${t.lead_name ? `<div style="display:flex;align-items:center;gap:6px"><div class="avatar avatar-sm">${initials(t.lead_name)}</div>${t.lead_name}</div>` : '<span class="text-muted">—</span>'}</td>
+        <td>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            ${members.slice(0,5).map(u => `<div class="avatar avatar-sm" title="${u.name}">${initials(u.name)}</div>`).join('')}
+            ${members.length > 5 ? `<div class="avatar avatar-sm" style="background:var(--surface-2);color:var(--text-2)">+${members.length - 5}</div>` : ''}
+          </div>
+        </td>
+        <td><span class="badge badge-blue">${members.length} member${members.length !== 1 ? 's' : ''}</span></td>
+        <td>
+          <div style="display:flex;gap:6px;align-items:center" onclick="event.stopPropagation()">
+            ${['vp','pm'].includes(me.role) ? `
+              <button class="btn btn-secondary btn-xs" onclick="openEditTeamModal(${t.id})">Edit</button>
+              <button class="btn btn-danger btn-xs" onclick="deleteTeam(${t.id}, '${t.name.replace(/'/g,"\\'")}')">Delete</button>
+            ` : ''}
+            <button class="btn btn-secondary btn-xs" onclick="openTeamDetail(${t.id})">Open →</button>
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
+
+  root.insertAdjacentHTML('beforeend', `
     <div class="card" style="margin-bottom:24px">
       <div class="card-body" style="padding:0">
         <table class="data-table">
           <thead>
             <tr>
-              <th>Team Name</th>
-              <th>Description</th>
-              <th>Lead</th>
-              <th>Members</th>
-              ${['vp','pm'].includes(me.role) ? '<th style="width:100px">Actions</th>' : ''}
+              <th>Team</th><th>Lead</th><th>Members</th><th>Size</th><th>Actions</th>
             </tr>
           </thead>
+          <tbody>${tbody}</tbody>
+        </table>
+      </div>
+    </div>
+  `);
+}
+
+/* ── Team Detail View ────────────────────────────────────────────────────────── */
+async function openTeamDetail(tid) {
+  const content = document.getElementById('tab-content');
+  content.innerHTML = `<div style="text-align:center;padding:48px"><div class="spinner" style="margin:auto"></div></div>`;
+
+  const team    = __teams.find(t => t.id === tid);
+  const members = __users.filter(u => u.team_id === tid);
+  const memberIds = new Set(members.map(m => m.id));
+
+  // Fetch tasks from all projects in parallel
+  const activePids = __projects.map(p => p.id);
+  let allTasks = [];
+  try {
+    const taskArrays = await Promise.all(activePids.map(pid => API.get(`/api/projects/${pid}/tasks`)));
+    const projMap = {};
+    __projects.forEach(p => { projMap[p.id] = p.name; });
+    taskArrays.forEach((tasks, i) => {
+      tasks.forEach(t => { t._projectName = projMap[activePids[i]]; t._projectId = activePids[i]; });
+      allTasks.push(...tasks);
+    });
+  } catch(e) { /* continue with empty */ }
+
+  const teamTasks = allTasks.filter(t => memberIds.has(t.assignee_id));
+
+  // Stats per member
+  const statsByMember = {};
+  members.forEach(m => { statsByMember[m.id] = { total: 0, active: 0, done: 0, blocked: 0 }; });
+  teamTasks.forEach(t => {
+    if (!statsByMember[t.assignee_id]) return;
+    statsByMember[t.assignee_id].total++;
+    if (t.status === 'completed') statsByMember[t.assignee_id].done++;
+    else if (t.status === 'blocked') statsByMember[t.assignee_id].blocked++;
+    else if (t.status === 'in_progress') statsByMember[t.assignee_id].active++;
+  });
+
+  const totalCapacity = members.reduce((s, m) => s + (m.capacity_hours_per_day || 8), 0);
+  const totalActiveTasks = teamTasks.filter(t => t.status === 'in_progress').length;
+  const totalDone        = teamTasks.filter(t => t.status === 'completed').length;
+  const totalBlocked     = teamTasks.filter(t => t.status === 'blocked').length;
+
+  content.innerHTML = `
+    <!-- Back -->
+    <div style="margin-bottom:16px">
+      <button class="btn btn-secondary btn-sm" onclick="switchTab('teams')">← Back to Teams</button>
+    </div>
+
+    <!-- Team Header -->
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-body" style="display:flex;align-items:flex-start;gap:20px">
+        <div class="avatar" style="width:56px;height:56px;font-size:20px;flex-shrink:0;background:var(--primary)">${team.name.slice(0,2).toUpperCase()}</div>
+        <div style="flex:1">
+          <div style="font-size:22px;font-weight:700;margin-bottom:4px">${team.name}</div>
+          <div style="color:var(--text-muted);margin-bottom:10px">${team.description || 'No description'}</div>
+          <div style="display:flex;gap:20px;flex-wrap:wrap">
+            <div><span style="color:var(--text-muted);font-size:12px">Team Lead</span><div style="font-weight:600">${team.lead_name || '—'}</div></div>
+            <div><span style="color:var(--text-muted);font-size:12px">Members</span><div style="font-weight:600">${members.length}</div></div>
+            <div><span style="color:var(--text-muted);font-size:12px">Total Capacity</span><div style="font-weight:600">${totalCapacity}h/day</div></div>
+            <div><span style="color:var(--text-muted);font-size:12px">Active Tasks</span><div style="font-weight:600">${totalActiveTasks}</div></div>
+            <div><span style="color:var(--text-muted);font-size:12px">Completed</span><div style="font-weight:600;color:var(--success)">${totalDone}</div></div>
+            ${totalBlocked > 0 ? `<div><span style="color:var(--text-muted);font-size:12px">Blocked</span><div style="font-weight:600;color:var(--danger)">${totalBlocked}</div></div>` : ''}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Members & Workload -->
+    <div class="section-title">Members & Resource Utilization</div>
+    <div class="card" style="margin-bottom:24px">
+      <div class="card-body" style="padding:0">
+        <table class="data-table">
+          <thead>
+            <tr><th>Member</th><th>Role</th><th>Capacity</th><th>Tasks</th><th>In Progress</th><th>Done</th><th>Blocked</th><th style="width:200px">Workload</th></tr>
+          </thead>
           <tbody>
-            ${__teams.map(t => `
-              <tr>
-                <td><strong>${t.name}</strong></td>
-                <td class="text-muted">${t.description || '—'}</td>
-                <td>${t.lead_name || '—'}</td>
-                <td>${t.member_count}</td>
-                ${['vp','pm'].includes(me.role) ? `
+            ${members.length === 0 ? `<tr><td colspan="8" style="text-align:center;padding:24px;color:var(--text-muted)">No members in this team</td></tr>` :
+              members.map(u => {
+                const s = statsByMember[u.id] || { total:0, active:0, done:0, blocked:0 };
+                const cap = u.capacity_hours_per_day || 8;
+                // rough utilization: assume each active task uses 2h/day
+                const usedH = s.active * 2;
+                const utilPct = Math.min(Math.round((usedH / cap) * 100), 100);
+                const barClass = utilPct > 85 ? 'over' : utilPct > 60 ? 'warn' : '';
+                const statusBadgeHtml = utilPct > 85 ? '<span class="badge badge-red">Overloaded</span>' : utilPct > 60 ? '<span class="badge badge-yellow">High Load</span>' : '<span class="badge badge-green">Available</span>';
+                return `<tr>
                   <td>
-                    <button class="btn btn-secondary btn-xs" onclick="openEditTeamModal(${t.id})">Edit</button>
-                    <button class="btn btn-danger btn-xs" onclick="deleteTeam(${t.id}, '${t.name.replace(/'/g,"\\'")}')">Delete</button>
-                  </td>` : ''}
-              </tr>`).join('')}
+                    <div style="display:flex;align-items:center;gap:10px">
+                      <div class="avatar avatar-sm">${initials(u.name)}</div>
+                      <div>
+                        <div style="font-weight:500">${u.name}</div>
+                        <div style="font-size:11px;color:var(--text-muted)">${u.email}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td>${roleLabel(u.role)}</td>
+                  <td>${cap}h/day</td>
+                  <td><strong>${s.total}</strong></td>
+                  <td><span style="color:var(--primary)">${s.active}</span></td>
+                  <td><span style="color:var(--success)">${s.done}</span></td>
+                  <td><span style="color:${s.blocked > 0 ? 'var(--danger)' : 'var(--text-muted)'}">${s.blocked}</span></td>
+                  <td>
+                    <div style="display:flex;align-items:center;gap:8px">
+                      <div class="util-bar" style="flex:1"><div class="util-fill ${barClass}" style="width:${utilPct}%"></div></div>
+                      <span style="font-size:11px;width:32px;text-align:right">${utilPct}%</span>
+                      ${statusBadgeHtml}
+                    </div>
+                  </td>
+                </tr>`;
+              }).join('')}
           </tbody>
         </table>
       </div>
-    </div>`;
-  root.insertAdjacentHTML('beforeend', table);
+    </div>
 
-  // Team member breakdown
-  root.insertAdjacentHTML('beforeend', `<div class="section-title">Members by Team</div>`);
-  const byTeam = {};
-  __users.forEach(u => {
-    const key = u.team_name || 'Unassigned';
-    (byTeam[key] = byTeam[key] || []).push(u);
+    <!-- All Tasks -->
+    <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+      Tasks Assigned to Team
+      <div style="display:flex;gap:8px">
+        <select id="task-status-filter" onchange="filterTeamTasks()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border-2);border-radius:var(--radius)">
+          <option value="">All Statuses</option>
+          <option value="in_progress">In Progress</option>
+          <option value="not_started">Not Started</option>
+          <option value="completed">Completed</option>
+          <option value="blocked">Blocked</option>
+          <option value="on_hold">On Hold</option>
+        </select>
+        <select id="task-member-filter" onchange="filterTeamTasks()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border-2);border-radius:var(--radius)">
+          <option value="">All Members</option>
+          ${members.map(u => `<option value="${u.id}">${u.name}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body" style="padding:0">
+        <table class="data-table" id="team-tasks-table">
+          <thead>
+            <tr><th>Task</th><th>Project</th><th>Assignee</th><th>Status</th><th>Start</th><th>Due</th><th>Progress</th></tr>
+          </thead>
+          <tbody id="team-tasks-body">
+            ${teamTasks.length === 0
+              ? `<tr><td colspan="7" style="text-align:center;padding:24px;color:var(--text-muted)">No tasks assigned to this team's members</td></tr>`
+              : teamTasks.map(t => `
+                <tr class="team-task-row"
+                    data-status="${t.status}"
+                    data-assignee="${t.assignee_id}"
+                    onclick="window.location='/projects/${t._projectId}'"
+                    style="cursor:pointer">
+                  <td>
+                    <div style="font-weight:500">${t.title}</div>
+                    ${t.wbs_number ? `<div style="font-size:11px;color:var(--text-muted)">${t.wbs_number}</div>` : ''}
+                  </td>
+                  <td style="font-size:12px;color:var(--text-muted)">${t._projectName}</td>
+                  <td>
+                    <div style="display:flex;align-items:center;gap:6px">
+                      <div class="avatar avatar-sm">${initials(t.assignee_name || '?')}</div>
+                      <span style="font-size:12px">${t.assignee_name || '—'}</span>
+                    </div>
+                  </td>
+                  <td>${statusBadge(t.status)}</td>
+                  <td style="font-size:12px;color:var(--text-muted)">${fmtDate(t.start_date) || '—'}</td>
+                  <td style="font-size:12px;color:${!t.end_date ? 'var(--text-muted)' : new Date(t.end_date) < new Date() && t.status !== 'completed' ? 'var(--danger)' : 'var(--text-muted)'}">${fmtDate(t.end_date) || '—'}</td>
+                  <td>
+                    <div style="display:flex;align-items:center;gap:6px">
+                      <div class="progress-bar" style="width:80px"><div class="fill" style="width:${t.percent_complete || 0}%"></div></div>
+                      <span style="font-size:11px">${t.percent_complete || 0}%</span>
+                    </div>
+                  </td>
+                </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function filterTeamTasks() {
+  const statusFilter = document.getElementById('task-status-filter')?.value || '';
+  const memberFilter = document.getElementById('task-member-filter')?.value || '';
+  document.querySelectorAll('.team-task-row').forEach(row => {
+    const matchStatus = !statusFilter || row.dataset.status === statusFilter;
+    const matchMember = !memberFilter || row.dataset.assignee === memberFilter;
+    row.style.display = matchStatus && matchMember ? '' : 'none';
   });
-  const cards = document.createElement('div');
-  cards.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;margin-bottom:24px';
-  Object.entries(byTeam).forEach(([teamName, members]) => {
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = `
-      <div class="card-body">
-        <div style="font-weight:600;margin-bottom:12px;color:var(--text-primary)">${teamName}</div>
-        ${members.map(u => `
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-            <div class="avatar avatar-sm">${initials(u.name)}</div>
-            <div>
-              <div style="font-size:13px;font-weight:500">${u.name}</div>
-              <div style="font-size:11px;color:var(--text-muted)">${roleLabel(u.role)}</div>
-            </div>
-          </div>`).join('')}
-      </div>`;
-    cards.appendChild(card);
-  });
-  root.appendChild(cards);
 }
 
 /* ── Members tab ────────────────────────────────────────────────────────────── */
