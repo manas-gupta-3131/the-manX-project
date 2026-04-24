@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}R&D PM Platform{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/main.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+
+<nav class="topnav">
+  <a class="brand" href="/dashboard">R&D<span>PM</span></a>
+  <div class="topnav-search">
+    <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+    <input type="text" placeholder="Search projects, tasks…" id="global-search">
+  </div>
+  <div class="topnav-spacer"></div>
+  <div class="topnav-actions">
+    <button class="nav-btn" id="notif-btn" title="Notifications">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+    </button>
+    <div class="user-chip" id="user-chip">
+      <div class="avatar" id="user-avatar">?</div>
+      <span id="user-name">…</span>
+      <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
+    </div>
+  </div>
+</nav>
+
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Navigation</div>
+      <a class="sidebar-link" href="/dashboard" id="nav-dashboard">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        Dashboard
+      </a>
+      <a class="sidebar-link" href="/dashboard#projects" id="nav-projects">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        Projects
+      </a>
+    </div>
+    <div class="sidebar-section" id="nav-team-section" style="display:none;">
+      <div class="sidebar-label">Team</div>
+      <a class="sidebar-link" href="/dashboard#teams" id="nav-teams">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        Teams & Members
+      </a>
+      <a class="sidebar-link" href="/dashboard#resources" id="nav-resources">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        Resource Health
+      </a>
+    </div>
+    <div class="sidebar-section" id="nav-approvals-section">
+      <div class="sidebar-label">Governance</div>
+      <a class="sidebar-link" href="/dashboard#approvals" id="nav-approvals">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+        Approvals
+      </a>
+    </div>
+    <div class="sidebar-bottom">
+      <a class="sidebar-link" href="#" onclick="doLogout(); return false;">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        Logout
+      </a>
+    </div>
+  </aside>
+
+  <main class="main-content">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+<div id="toast-container"></div>
+
+<script src="/static/js/api.js"></script>
+<script>
+  (async () => {
+    try {
+      const me = await API.get('/api/auth/me');
+      window.__me = me;
+      document.getElementById('user-name').textContent = me.name;
+      document.getElementById('user-avatar').textContent = initials(me.name);
+      if (['vp', 'pm', 'lead'].includes(me.role)) {
+        document.getElementById('nav-team-section').style.display = '';
+      }
+    } catch(e) { window.location.href = '/login'; }
+  })();
+
+  async function doLogout() {
+    await API.post('/api/auth/logout');
+    window.location.href = '/login';
+  }
+
+  // Highlight active sidebar link
+  const path = window.location.pathname;
+  document.querySelectorAll('.sidebar-link').forEach(a => {
+    if (a.getAttribute('href') === path) a.classList.add('active');
+  });
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
