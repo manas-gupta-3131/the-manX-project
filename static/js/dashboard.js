@@ -10,6 +10,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadDashboard(me);
 });
 
+window.addEventListener('hashchange', () => {
+  const tab = hashToTab(window.location.hash);
+  if (tab) switchTab(tab);
+});
+
+function hashToTab(hash) {
+  const map = { '#projects': 'portfolio', '#teams': 'teams', '#resources': 'members', '#approvals': 'alerts', '#members': 'members', '#alerts': 'alerts' };
+  return map[hash] || null;
+}
+
 function waitForUser() {
   return new Promise(resolve => {
     const check = () => window.__me ? resolve() : setTimeout(check, 50);
@@ -40,7 +50,8 @@ async function loadDashboard(me) {
   renderHeader(root, me);
   renderStatTiles(root, me);
   renderTabs(root, me);
-  switchTab(__activeTab);
+  const tabFromHash = hashToTab(window.location.hash);
+  switchTab(tabFromHash || __activeTab);
 }
 
 /* ── Header ─────────────────────────────────────────────────────────────────── */

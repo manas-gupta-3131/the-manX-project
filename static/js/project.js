@@ -421,6 +421,22 @@ function openAddTaskModal(parentId) {
     </div>
     <div class="form-row">
       <div class="form-group">
+        <label>Status</label>
+        <select id="nt-status">
+          <option value="not_started" selected>Not Started</option>
+          <option value="in_progress">In Progress</option>
+          <option value="completed">Completed</option>
+          <option value="blocked">Blocked</option>
+          <option value="on_hold">On Hold</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>% Complete</label>
+        <input type="number" id="nt-pct" min="0" max="100" value="0">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
         <label>Assignee</label>
         <select id="nt-assignee">
           <option value="">— unassigned —</option>
@@ -472,17 +488,19 @@ async function submitAddTask() {
   const typeVal = document.getElementById('nt-type').value;
   try {
     await API.post(`/api/projects/${PID}/tasks`, {
-      title:          name,
-      task_type:      typeVal,
-      parent_task_id: document.getElementById('nt-parent').value ? parseInt(document.getElementById('nt-parent').value) : null,
-      start_date:     document.getElementById('nt-start').value || null,
-      end_date:       document.getElementById('nt-end').value   || null,
-      duration_days:  parseInt(document.getElementById('nt-dur').value)    || 1,
-      effort_days:    parseFloat(document.getElementById('nt-effort').value) || null,
-      assignee_id:    document.getElementById('nt-assignee').value ? parseInt(document.getElementById('nt-assignee').value) : null,
-      wbs_number:     document.getElementById('nt-wbs').value || null,
-      description:    document.getElementById('nt-desc').value || null,
-      is_milestone:   document.getElementById('nt-milestone').checked,
+      title:            name,
+      task_type:        typeVal,
+      status:           document.getElementById('nt-status').value,
+      percent_complete: parseFloat(document.getElementById('nt-pct').value) || 0,
+      parent_task_id:   document.getElementById('nt-parent').value ? parseInt(document.getElementById('nt-parent').value) : null,
+      start_date:       document.getElementById('nt-start').value || null,
+      end_date:         document.getElementById('nt-end').value   || null,
+      duration_days:    parseInt(document.getElementById('nt-dur').value)      || 1,
+      effort_days:      parseFloat(document.getElementById('nt-effort').value) || null,
+      assignee_id:      document.getElementById('nt-assignee').value ? parseInt(document.getElementById('nt-assignee').value) : null,
+      wbs_number:       document.getElementById('nt-wbs').value || null,
+      description:      document.getElementById('nt-desc').value || null,
+      is_milestone:     document.getElementById('nt-milestone').checked,
     });
     closeModal();
     toast('Task added', 'success');
