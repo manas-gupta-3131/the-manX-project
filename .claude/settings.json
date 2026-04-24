@@ -6,7 +6,12 @@
       "Bash(gh repo *)",
       "Bash(git remote *)",
       "Bash(git add *)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(python seed.py)",
+      "Bash(python app.py)",
+      "Bash(curl -s http://127.0.0.1:5000/login)"
     ]
   }
 }
