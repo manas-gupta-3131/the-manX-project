@@ -15,7 +15,40 @@ let state = {
   ganttMode: 'Week', // current view mode
   expanded:  new Set(), // set of task ids that are expanded (show children)
   selected:  null,   // currently selected task id
+  serialOf:  {},     // task.id  → serial number (1-based row #)
+  bySerial:  {},     // serial # → task.id
 };
+
+// ── Serial number helpers ────────────────────────────────────────────────────
+// Each task gets a stable 1-based row number based on its position in the
+// hierarchical display order (parents before their children, depth-first).
+// This is the "serial number" users type when adding predecessors.
+function rebuildSerialIndex() {
+  state.serialOf = {};
+  state.bySerial = {};
+  const roots = buildTree();
+  let n = 0;
+  const walk = (nodes) => {
+    nodes.forEach(node => {
+      n += 1;
+      state.serialOf[node.id] = n;
+      state.bySerial[n]       = node.id;
+      if (node.children && node.children.length) walk(node.children);
+    });
+  };
+  walk(roots);
+}
+
+// Format predecessors for display: "3FS, 5SS+2"
+function formatPredsFor(taskId) {
+  const preds = state.deps.filter(d => d.successor_id === taskId);
+  if (!preds.length) return '';
+  return preds.map(d => {
+    const s = state.serialOf[d.predecessor_id] || '?';
+    const lag = d.lag_days ? (d.lag_days > 0 ? `+${d.lag_days}` : `${d.lag_days}`) : '';
+    return `${s}${d.dep_type}${lag}`;
+  }).join(', ');
+}
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
@@ -43,6 +76,11 @@ async function loadAll() {
   // Default: expand root tasks
   state.tasks.filter(t => !t.parent_task_id).forEach(t => state.expanded.add(t.id));
 
+  // Recompute on load so parent/phase tasks always have rolled-up dates.
+  try { await API.post(`/api/projects/${PID}/schedule/recompute`); } catch(_) {}
+  const freshTasks = await API.get(`/api/projects/${PID}/tasks`);
+  state.tasks = freshTasks;
+
   renderHeader();
   renderTaskGrid();
   renderGantt();
@@ -62,6 +100,26 @@ function renderHeader() {
     document.getElementById('proj-npd').textContent = p.npd_reference;
   }
   document.title = `${p.name} — R&D PM`;
+
+  // NPD breach warning banner
+  let warnEl = document.getElementById('proj-npd-warn');
+  if (!warnEl) {
+    warnEl = document.createElement('div');
+    warnEl.id = 'proj-npd-warn';
+    document.querySelector('.project-header').appendChild(warnEl);
+  }
+  const forecast = p.current_forecast_date || p.target_date;
+  const hasBreach = p.target_date && forecast && forecast > p.target_date;
+  if (hasBreach) {
+    const days = Math.round((new Date(forecast + 'T00:00:00') - new Date(p.target_date + 'T00:00:00')) / 86400000);
+    warnEl.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;background:#fef3c7;border-left:3px solid #d97706;padding:8px 14px;border-radius:0 4px 4px 0;font-size:13px;color:#92400e;margin-top:6px">
+        <svg width="15" height="15" fill="none" stroke="#d97706" stroke-width="2.5" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span>Project forecast is <strong>${days} day${days !== 1 ? 's' : ''} past NPD target</strong> (${fmtDate(p.target_date)}). Review the schedule or update the commitment.</span>
+      </div>`;
+  } else {
+    warnEl.innerHTML = '';
+  }
 }
 
 // ── Build tree from flat list ─────────────────────────────────────────────────
@@ -87,13 +145,14 @@ function flattenVisible(nodes, depth = 0, result = []) {
 
 // ── Task Grid Render ──────────────────────────────────────────────────────────
 function renderTaskGrid() {
+  rebuildSerialIndex();
   const roots   = buildTree();
   const visible = flattenVisible(roots);
   const tbody   = document.getElementById('task-rows');
   tbody.innerHTML = '';
 
   if (!visible.length) {
-    tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state"><p>No tasks yet. Click <strong>Add Task</strong> to get started.</p></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11"><div class="empty-state"><p>No tasks yet. Click <strong>Add Task</strong> to get started.</p></div></td></tr>`;
     return;
   }
 
@@ -102,10 +161,13 @@ function renderTaskGrid() {
     const isExpanded = state.expanded.has(t.id);
     const indent    = t._depth * 18;
     const typeDot   = typeIndicator(t.task_type, t.is_milestone);
-    const assignee  = t.assignee_name || '—';
     const start     = t.computed_start || t.start_date;
     const end       = t.computed_end   || t.end_date;
     const isSelected = state.selected === t.id;
+    const targetDate = state.project?.target_date;
+    const isBreaching = targetDate && end && end > targetDate;
+    const serial    = state.serialOf[t.id] || '';
+    const predStr   = formatPredsFor(t.id);
 
     const tr = document.createElement('tr');
     tr.dataset.id = t.id;
@@ -115,6 +177,7 @@ function renderTaskGrid() {
       <td class="task-row-expand">
         ${isParent ? `<span onclick="toggleExpand(${t.id})">${isExpanded ? '▾' : '▸'}</span>` : ''}
       </td>
+      <td style="color:var(--text-2);font-size:11px;font-weight:600;text-align:center" title="Row # (use this as predecessor reference)">${serial}</td>
       <td title="${t.wbs_number || ''}" style="color:var(--text-3);font-size:11px">${t.wbs_number || ''}</td>
       <td>
         <div class="task-name-cell">
@@ -124,9 +187,12 @@ function renderTaskGrid() {
           ${t.is_critical ? '<span class="badge badge-red" style="font-size:10px;padding:1px 5px;margin-left:4px">CP</span>' : ''}
         </div>
       </td>
+      <td style="color:var(--text-2);font-size:11px;font-family:var(--mono,monospace)" title="${predStr ? 'Predecessors: ' + predStr : 'No predecessors'}">${predStr || '<span style="color:var(--text-3)">—</span>'}</td>
       <td style="color:var(--text-2)">${t.duration_days || 1}d</td>
       <td style="color:var(--text-2);font-size:12px">${start ? fmtShort(start) : '—'}</td>
-      <td style="color:var(--text-2);font-size:12px">${end   ? fmtShort(end)   : '—'}</td>
+      <td style="color:${isBreaching ? '#dc2626' : 'var(--text-2)'};font-size:12px" title="${isBreaching ? 'Exceeds NPD target: ' + fmtDate(targetDate) : ''}">
+        ${end ? fmtShort(end) : '—'}${isBreaching ? ' <span style="font-size:10px">⚠</span>' : ''}
+      </td>
       <td title="${t.assignee_name || ''}">
         ${t.assignee_name ? `<span class="kc-avatar" style="width:20px;height:20px;font-size:9px">${initials(t.assignee_name)}</span> <span style="font-size:12px">${firstWord(t.assignee_name)}</span>` : '<span style="color:var(--text-3)">—</span>'}
       </td>
@@ -134,6 +200,9 @@ function renderTaskGrid() {
       <td>
         <div class="flex gap-8">
           <button class="btn-ghost btn-icon" onclick="openAddTaskModal(${t.id})" title="Add subtask" style="font-size:14px;width:24px;height:24px">+</button>
+          <button class="btn-ghost btn-icon" onclick="openEditTaskModal(${t.id})" title="Edit task" style="color:var(--text-2);width:24px;height:24px">
+            <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
           <button class="btn-ghost btn-icon" onclick="deleteTask(${t.id})" title="Delete" style="color:var(--text-3);width:24px;height:24px">
             <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
           </button>
@@ -177,10 +246,11 @@ function renderGantt() {
   });
 
   const today = new Date().toISOString().slice(0, 10);
+  // Use project start as the fallback so tasks without dates still appear in the chart.
+  const projectFallback = state.project?.start_date || today;
   const ganttTasks = state.tasks
-    .filter(t => (t.computed_start || t.start_date))
     .map(t => {
-      const s = t.computed_start || t.start_date || today;
+      const s = t.computed_start || t.start_date || projectFallback;
       const e = t.computed_end   || t.end_date   || s;
       return {
         id:           String(t.id),
@@ -193,8 +263,8 @@ function renderGantt() {
       };
     });
 
-  if (!ganttTasks.length) {
-    container.innerHTML = `<div class="empty-state" style="margin-top:60px"><p>Add tasks with start dates to see the Gantt chart.</p></div>`;
+  if (!state.tasks.length) {
+    container.innerHTML = `<div class="empty-state" style="margin-top:60px"><p>No tasks yet. Click <strong>Add Task</strong> to get started.</p></div>`;
     return;
   }
 
@@ -237,6 +307,7 @@ function renderGantt() {
   } catch(e) {
     container.innerHTML = `<div class="empty-state"><p>Gantt render error: ${e.message}</p></div>`;
   }
+  setupScrollSync();
 }
 
 function setGanttMode(mode, btn) {
@@ -244,6 +315,30 @@ function setGanttMode(mode, btn) {
   document.querySelectorAll('.view-mode-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   if (state.gantt) state.gantt.change_view_mode(mode);
+}
+
+// ── Vertical scroll sync between task grid and Gantt panels ───────────────────
+// Each panel scrolls independently in the DOM, which causes rows to drift out
+// of alignment with their Gantt bars. We mirror vertical scroll position
+// between the two so a task row always sits next to its bar.
+let _scrollSyncBound = false;
+function setupScrollSync() {
+  if (_scrollSyncBound) return;
+  const left  = document.getElementById('task-grid-panel');
+  const right = document.getElementById('gantt-chart-panel');
+  if (!left || !right) return;
+
+  let lockSrc = null;
+  const sync = (src, dst) => () => {
+    if (lockSrc && lockSrc !== src) return;
+    lockSrc = src;
+    dst.scrollTop = src.scrollTop;
+    // Release the lock after the paired scroll event has fired & settled.
+    requestAnimationFrame(() => { lockSrc = null; });
+  };
+  left.addEventListener('scroll',  sync(left,  right), { passive: true });
+  right.addEventListener('scroll', sync(right, left),  { passive: true });
+  _scrollSyncBound = true;
 }
 
 // ── Refresh (after mutations) ─────────────────────────────────────────────────
@@ -322,10 +417,12 @@ function openDrawer(tid) {
         <ul class="dep-list">
           ${predecessors.map(d => {
             const pred = state.tasks.find(x => x.id === d.predecessor_id);
+            const ps   = state.serialOf[d.predecessor_id] || '?';
+            const lag  = d.lag_days ? (d.lag_days > 0 ? `+${d.lag_days}` : `${d.lag_days}`) : '';
             return `<li class="dep-item">
-              <span class="dep-type">${d.dep_type}</span>
+              <span style="font-weight:700;color:var(--text-2);font-size:11px;min-width:22px">#${ps}</span>
+              <span class="dep-type">${d.dep_type}${lag}</span>
               <span class="dep-name">${pred ? pred.title : d.predecessor_id}</span>
-              ${d.lag_days ? `<span style="color:var(--text-3);font-size:11px">+${d.lag_days}d</span>` : ''}
               <span class="dep-remove" onclick="deleteDep(${d.id})" title="Remove">✕</span>
             </li>`;
           }).join('')}
@@ -338,8 +435,11 @@ function openDrawer(tid) {
       <ul class="dep-list">
         ${successors.map(d => {
           const succ = state.tasks.find(x => x.id === d.successor_id);
+          const ss   = state.serialOf[d.successor_id] || '?';
+          const lag  = d.lag_days ? (d.lag_days > 0 ? `+${d.lag_days}` : `${d.lag_days}`) : '';
           return `<li class="dep-item">
-            <span class="dep-type">${d.dep_type}</span>
+            <span style="font-weight:700;color:var(--text-2);font-size:11px;min-width:22px">#${ss}</span>
+            <span class="dep-type">${d.dep_type}${lag}</span>
             <span class="dep-name">${succ ? succ.title : d.successor_id}</span>
           </li>`;
         }).join('')}
@@ -456,6 +556,14 @@ function openAddTaskModal(parentId) {
       <input type="checkbox" id="nt-milestone" style="width:auto">
       <label for="nt-milestone" style="margin:0;font-weight:400">Mark as Milestone</label>
     </div>
+    <div class="form-group" style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <label style="margin:0">Predecessors</label>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addDepRow()">+ Add Predecessor</button>
+      </div>
+      <div style="font-size:11px;color:var(--text-3);margin-bottom:8px">Type the <strong>Row #</strong> (from the # column) of the predecessor task. FS = Finish→Start &nbsp;|&nbsp; SS = Start→Start &nbsp;|&nbsp; FF = Finish→Finish &nbsp;|&nbsp; SF = Start→Finish &nbsp;|&nbsp; Lag = offset in days</div>
+      <div id="pending-deps-container"></div>
+    </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="submitAddTask()">Add Task</button>
@@ -487,7 +595,7 @@ async function submitAddTask() {
   if (!name) { toast('Task name is required', 'error'); return; }
   const typeVal = document.getElementById('nt-type').value;
   try {
-    await API.post(`/api/projects/${PID}/tasks`, {
+    const newTask = await API.post(`/api/projects/${PID}/tasks`, {
       title:            name,
       task_type:        typeVal,
       status:           document.getElementById('nt-status').value,
@@ -502,6 +610,18 @@ async function submitAddTask() {
       description:      document.getElementById('nt-desc').value || null,
       is_milestone:     document.getElementById('nt-milestone').checked,
     });
+    // Create any predecessor dependencies that were added
+    const depRows = collectDepRows();
+    for (const dep of depRows) {
+      try {
+        await API.post('/api/dependencies', {
+          predecessor_id: dep.pred_id,
+          successor_id:   newTask.id,
+          dep_type:       dep.dep_type,
+          lag_days:       dep.lag_days,
+        });
+      } catch(_) {}
+    }
     closeModal();
     toast('Task added', 'success');
     await refreshTasks();
@@ -512,8 +632,46 @@ async function submitAddTask() {
 function openEditTaskModal(tid) {
   const t = state.tasks.find(x => x.id === tid);
   if (!t) return;
+
+  // Use computed dates (what the scheduler derived) as the displayed/editable dates.
+  // These are what the drawer and task grid show, so the modal must match.
+  const editStart = t.computed_start || t.start_date || '';
+  const editEnd   = t.computed_end   || t.end_date   || '';
+  // Show a hint when computed dates differ from the manually planned dates.
+  const startDiffers = t.computed_start && t.start_date && t.computed_start !== t.start_date;
+  const endDiffers   = t.computed_end   && t.end_date   && t.computed_end   !== t.end_date;
+
   const usersOpts = state.users.map(u =>
     `<option value="${u.id}" ${u.id === t.assignee_id ? 'selected' : ''}>${u.name}</option>`).join('');
+
+  const existingPreds = state.deps.filter(d => d.successor_id === tid);
+  const existingPredHtml = existingPreds.length
+    ? existingPreds.map(d => {
+        const pred = state.tasks.find(x => x.id === d.predecessor_id);
+        const ps   = state.serialOf[d.predecessor_id] || '?';
+        return `<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px;padding:5px 8px;background:var(--surface-2);border-radius:4px;font-size:12px">
+          <span style="font-weight:700;min-width:22px;font-size:11px;color:var(--text-2);text-align:center">#${ps}</span>
+          <span style="font-weight:700;color:var(--primary);min-width:26px;font-size:11px">${d.dep_type}</span>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${pred ? pred.title : '(task #' + d.predecessor_id + ')'}</span>
+          ${d.lag_days ? `<span style="color:var(--text-3);font-size:11px">${d.lag_days > 0 ? '+' : ''}${d.lag_days}d</span>` : ''}
+          <button class="btn-ghost btn-icon" type="button" onclick="deleteDepInModal(${d.id},${tid})" title="Remove dependency" style="color:var(--text-3);width:18px;height:18px;padding:0;font-size:12px;flex-shrink:0">✕</button>
+        </div>`;
+      }).join('')
+    : `<div style="font-size:12px;color:var(--text-3);margin-bottom:4px">No predecessors defined.</div>`;
+
+  const existingSuccs = state.deps.filter(d => d.predecessor_id === tid);
+  const existingSuccHtml = existingSuccs.length
+    ? existingSuccs.map(d => {
+        const succ = state.tasks.find(x => x.id === d.successor_id);
+        const ss   = state.serialOf[d.successor_id] || '?';
+        return `<div style="display:flex;gap:6px;align-items:center;padding:5px 8px;background:var(--surface-2);border-radius:4px;font-size:12px;margin-bottom:4px">
+          <span style="font-weight:700;min-width:22px;font-size:11px;color:var(--text-2);text-align:center">#${ss}</span>
+          <span style="font-weight:700;color:var(--primary);min-width:26px;font-size:11px">${d.dep_type}</span>
+          <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${succ ? succ.title : '(task #' + d.successor_id + ')'}</span>
+          ${d.lag_days ? `<span style="color:var(--text-3);font-size:11px">${d.lag_days > 0 ? '+' : ''}${d.lag_days}d</span>` : ''}
+        </div>`;
+      }).join('')
+    : `<div style="font-size:12px;color:var(--text-3)">No successors defined.</div>`;
 
   showModal(`
     <div class="form-group">
@@ -538,12 +696,12 @@ function openEditTaskModal(tid) {
     </div>
     <div class="form-row">
       <div class="form-group">
-        <label>Start Date</label>
-        <input type="date" id="et-start" value="${t.start_date || ''}">
+        <label>Start Date ${startDiffers ? `<span style="font-weight:400;color:var(--text-3);font-size:11px">(planned: ${fmtDate(t.start_date)})</span>` : ''}</label>
+        <input type="date" id="et-start" value="${editStart}">
       </div>
       <div class="form-group">
-        <label>End Date</label>
-        <input type="date" id="et-end" value="${t.end_date || ''}">
+        <label>End Date ${endDiffers ? `<span style="font-weight:400;color:var(--text-3);font-size:11px">(planned: ${fmtDate(t.end_date)})</span>` : ''}</label>
+        <input type="date" id="et-end" value="${editEnd}">
       </div>
     </div>
     <div class="form-row">
@@ -575,8 +733,26 @@ function openEditTaskModal(tid) {
     </div>
     <div class="form-group">
       <label>Description</label>
-      <textarea id="et-desc" rows="3">${t.description || ''}</textarea>
+      <textarea id="et-desc" rows="2">${t.description || ''}</textarea>
     </div>
+
+    <!-- Predecessor dependencies -->
+    <div class="form-group" style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <label style="margin:0">Predecessors</label>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addDepRow()">+ Add</button>
+      </div>
+      <div style="font-size:11px;color:var(--text-3);margin-bottom:8px">Type the <strong>Row #</strong> (from the # column) of the predecessor task. FS = Finish→Start &nbsp;|&nbsp; SS = Start→Start &nbsp;|&nbsp; FF = Finish→Finish &nbsp;|&nbsp; SF = Start→Finish &nbsp;|&nbsp; Lag = offset in days</div>
+      ${existingPredHtml}
+      <div id="pending-deps-container" style="margin-top:4px"></div>
+    </div>
+
+    <!-- Successor dependencies (read-only view) -->
+    <div class="form-group" style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+      <label style="margin-bottom:8px;display:block">Successors <span style="font-weight:400;color:var(--text-3);font-size:11px">(tasks that depend on this one)</span></label>
+      ${existingSuccHtml}
+    </div>
+
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="submitEditTask(${tid})">Save Changes</button>
@@ -602,9 +778,94 @@ async function submitEditTask(tid) {
       effort_days:    parseFloat(document.getElementById('et-effort').value) || null,
       description:    document.getElementById('et-desc').value || null,
     });
+    // Create any new predecessor dependencies
+    const depRows = collectDepRows();
+    for (const dep of depRows) {
+      try {
+        await API.post('/api/dependencies', {
+          predecessor_id: dep.pred_id,
+          successor_id:   tid,
+          dep_type:       dep.dep_type,
+          lag_days:       dep.lag_days,
+        });
+      } catch(_) {}
+    }
     closeModal();
     toast('Task saved', 'success');
     await refreshTasks();
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ── Dependency row helpers (used by Add Task and Edit Task modals) ────────────
+// UX: user types the Row # (from the # column in the task grid) of the
+// predecessor task — no dropdown, no scrolling through long task lists.
+
+function addDepRow() {
+  const container = document.getElementById('pending-deps-container');
+  if (!container) return;
+  const maxSerial = Object.keys(state.bySerial).length;
+  container.insertAdjacentHTML('beforeend', `
+    <div class="dep-row-inline" style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+      <input type="number" class="dep-pred-serial" min="1" max="${maxSerial}"
+             style="width:64px;flex:none" placeholder="Row #"
+             title="Type the # of the predecessor task (see # column)">
+      <span class="dep-pred-preview" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--text-3)">— pick a row —</span>
+      <select class="dep-type-sel" style="width:58px;flex:none" title="Dependency type">
+        <option value="FS">FS</option>
+        <option value="SS">SS</option>
+        <option value="FF">FF</option>
+        <option value="SF">SF</option>
+      </select>
+      <input type="number" class="dep-lag-inp" value="0" min="-30" max="365"
+             style="width:52px;flex:none" placeholder="lag" title="Lag days (negative = lead time)">
+      <button class="btn-ghost btn-icon" type="button" onclick="removeDepRow(this)"
+              title="Remove" style="color:var(--text-3);flex:none;padding:0;width:22px;height:22px">✕</button>
+    </div>`);
+
+  // Live-preview: when user types a row #, show the task title
+  const row = container.lastElementChild;
+  const serialInp = row.querySelector('.dep-pred-serial');
+  const preview   = row.querySelector('.dep-pred-preview');
+  serialInp.addEventListener('input', () => {
+    const n   = parseInt(serialInp.value);
+    const tid = state.bySerial[n];
+    const t   = tid ? state.tasks.find(x => x.id === tid) : null;
+    if (t) {
+      preview.textContent = t.title;
+      preview.style.color = 'var(--text-1)';
+    } else {
+      preview.textContent = serialInp.value ? '⚠ no row ' + serialInp.value : '— pick a row —';
+      preview.style.color = serialInp.value ? '#dc2626' : 'var(--text-3)';
+    }
+  });
+  serialInp.focus();
+}
+
+function removeDepRow(btn) {
+  btn.closest('.dep-row-inline').remove();
+}
+
+function collectDepRows() {
+  const rows = document.querySelectorAll('#pending-deps-container .dep-row-inline');
+  const deps = [];
+  rows.forEach(row => {
+    const serial  = parseInt(row.querySelector('.dep-pred-serial').value);
+    const pred_id = state.bySerial[serial];
+    if (!pred_id) return;
+    deps.push({
+      pred_id,
+      dep_type: row.querySelector('.dep-type-sel').value,
+      lag_days: parseInt(row.querySelector('.dep-lag-inp').value) || 0,
+    });
+  });
+  return deps;
+}
+
+async function deleteDepInModal(depId, taskId) {
+  try {
+    await API.delete(`/api/dependencies/${depId}`);
+    state.deps = await API.get(`/api/projects/${PID}/dependencies`);
+    openEditTaskModal(taskId);
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -623,18 +884,18 @@ async function deleteTask(tid) {
 // ── Dependency Modal ──────────────────────────────────────────────────────────
 function openAddDepModal(successorId) {
   const t = state.tasks.find(x => x.id === successorId);
-  const otherTasks = state.tasks.filter(x => x.id !== successorId);
-  const opts = otherTasks.map(x =>
-    `<option value="${x.id}">${x.wbs_number ? x.wbs_number + ' ' : ''}${x.title}</option>`).join('');
+  const successorSerial = state.serialOf[successorId] || '?';
+  const maxSerial = Object.keys(state.bySerial).length;
 
   showModal(`
     <div class="form-group">
       <label>Successor Task</label>
-      <input type="text" value="${t ? t.title : successorId}" disabled style="background:var(--surface-2)">
+      <input type="text" value="#${successorSerial} — ${t ? t.title : successorId}" disabled style="background:var(--surface-2)">
     </div>
     <div class="form-group">
-      <label>Predecessor Task *</label>
-      <select id="dep-pred">${opts}</select>
+      <label>Predecessor Row # *</label>
+      <input type="number" id="dep-pred-serial" min="1" max="${maxSerial}" placeholder="e.g. 3" autofocus>
+      <div id="dep-pred-preview" style="margin-top:4px;font-size:12px;color:var(--text-3)">Type the # of the predecessor task (see the # column in the task grid).</div>
     </div>
     <div class="form-row">
       <div class="form-group">
@@ -651,8 +912,12 @@ function openAddDepModal(successorId) {
         <input type="number" id="dep-lag" value="0" min="-30" max="365">
       </div>
     </div>
-    <div class="text-sm text-muted" style="margin-bottom:12px">
-      <strong>Tip:</strong> FS means successor starts after predecessor finishes. SS = parallel start. Lag adds a delay (negative lag = lead time).
+    <div class="text-sm text-muted" style="margin-bottom:12px;line-height:1.6">
+      <strong>FS</strong>: successor starts after predecessor finishes.<br>
+      <strong>SS</strong>: both start together.<br>
+      <strong>FF</strong>: both finish together.<br>
+      <strong>SF</strong>: successor finishes when predecessor starts.<br>
+      Lag adds a delay (negative = lead time).
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
@@ -660,14 +925,37 @@ function openAddDepModal(successorId) {
     </div>
   `);
   setModalTitle('Add Dependency');
+
+  // Live preview of which task the row # maps to
+  const inp = document.getElementById('dep-pred-serial');
+  const pv  = document.getElementById('dep-pred-preview');
+  inp.addEventListener('input', () => {
+    const n   = parseInt(inp.value);
+    const tid = state.bySerial[n];
+    if (tid === successorId) {
+      pv.textContent = '⚠ a task cannot depend on itself';
+      pv.style.color = '#dc2626';
+      return;
+    }
+    const pred = tid ? state.tasks.find(x => x.id === tid) : null;
+    if (pred) {
+      pv.textContent = '→ ' + pred.title;
+      pv.style.color = 'var(--text-1)';
+    } else {
+      pv.textContent = inp.value ? '⚠ no row ' + inp.value : 'Type the # of the predecessor task.';
+      pv.style.color = inp.value ? '#dc2626' : 'var(--text-3)';
+    }
+  });
 }
 
 async function submitAddDep(successorId) {
-  const predId = document.getElementById('dep-pred').value;
-  if (!predId) { toast('Select a predecessor', 'error'); return; }
+  const serial = parseInt(document.getElementById('dep-pred-serial').value);
+  const predId = state.bySerial[serial];
+  if (!predId) { toast('Enter a valid Row #', 'error'); return; }
+  if (predId === successorId) { toast('A task cannot depend on itself', 'error'); return; }
   try {
     await API.post('/api/dependencies', {
-      predecessor_id: parseInt(predId),
+      predecessor_id: predId,
       successor_id:   successorId,
       dep_type:       document.getElementById('dep-type').value,
       lag_days:       parseInt(document.getElementById('dep-lag').value) || 0,

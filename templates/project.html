@@ -98,8 +98,10 @@
       <table class="task-grid" id="task-grid">
         <colgroup>
           <col class="col-expand">
+          <col style="width:34px">
           <col class="col-wbs">
           <col class="col-name">
+          <col style="width:90px">
           <col class="col-dur">
           <col class="col-start">
           <col class="col-end">
@@ -110,8 +112,10 @@
         <thead>
           <tr>
             <th></th>
+            <th title="Row number — use this to reference the task as a predecessor">#</th>
             <th>WBS</th>
             <th>Task Name</th>
+            <th title="Predecessors (Row # + dependency type)">Pred</th>
             <th title="Duration (days)">Dur</th>
             <th>Start</th>
             <th>Finish</th>
@@ -121,7 +125,7 @@
           </tr>
         </thead>
         <tbody id="task-rows">
-          <tr><td colspan="9" style="text-align:center;padding:24px;color:var(--text-3)"><div class="spinner" style="margin:auto"></div></td></tr>
+          <tr><td colspan="11" style="text-align:center;padding:24px;color:var(--text-3)"><div class="spinner" style="margin:auto"></div></td></tr>
         </tbody>
       </table>
     </div>
