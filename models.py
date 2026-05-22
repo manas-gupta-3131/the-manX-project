@@ -11,6 +11,7 @@ class User(UserMixin, db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256))
     role = db.Column(db.String(20), nullable=False)  # vp, pm, lead, member
+    is_admin = db.Column(db.Boolean, default=False)  # system-level admin flag
     team_id = db.Column(db.Integer, db.ForeignKey('teams.id'), nullable=True)
     capacity_hours_per_day = db.Column(db.Float, default=8.0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -29,6 +30,7 @@ class User(UserMixin, db.Model):
             'name': self.name,
             'email': self.email,
             'role': self.role,
+            'is_admin': bool(self.is_admin),
             'team_id': self.team_id,
             'team_name': self.team.name if self.team else None,
             'capacity_hours_per_day': self.capacity_hours_per_day,
@@ -259,3 +261,22 @@ class AuditLog(db.Model):
             'new_value': self.new_value,
             'timestamp': self.timestamp.isoformat(),
         }
+
+
+class ProjectAccess(db.Model):
+    """
+    Explicit admin grant: user_id can see project_id.
+    Composite PK ensures exactly one record per (user, project) pair.
+    This table is ONLY used for admin-granted access; role-based automatic
+    access (VP sees all, PM sees own, Lead sees team projects) is computed
+    at query time and does NOT require rows here.
+    """
+    __tablename__ = 'project_access'
+    user_id    = db.Column(db.Integer, db.ForeignKey('users.id'),    primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), primary_key=True)
+    granted_by = db.Column(db.Integer, db.ForeignKey('users.id'),    nullable=True)
+    granted_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user    = db.relationship('User',    foreign_keys=[user_id])
+    project = db.relationship('Project', foreign_keys=[project_id])
+    granter = db.relationship('User',    foreign_keys=[granted_by])

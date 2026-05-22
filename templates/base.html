@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}R&D PM Platform{% endblock %}</title>
   <link rel="stylesheet" href="/static/css/main.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.css">
   {% block head %}{% endblock %}
 </head>
 <body>
@@ -83,6 +84,13 @@
         Approvals
       </a>
     </div>
+    <div class="sidebar-section" id="nav-admin-section" style="display:none">
+      <div class="sidebar-label">System</div>
+      <a class="sidebar-link" href="/dashboard#admin" id="nav-admin" onclick="if(window.switchTab){event.preventDefault();switchTab('admin');}">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Access Control
+      </a>
+    </div>
     <div class="sidebar-bottom">
       <a class="sidebar-link" href="#" onclick="doLogout(); return false;">
         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -98,6 +106,7 @@
 
 <div id="toast-container"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.min.js"></script>
 <script src="/static/js/api.js"></script>
 <script>
   (async () => {
@@ -109,9 +118,17 @@
       document.getElementById('user-avatar').textContent = initials(me.name);
       document.getElementById('menu-name').textContent  = me.name;
       document.getElementById('menu-email').textContent = me.email;
-      document.getElementById('menu-role').innerHTML = `<span style="display:inline-block;padding:2px 8px;background:var(--primary-10,rgba(37,99,235,.12));color:var(--primary);border-radius:20px;font-weight:600">${roleMap[me.role] || me.role}</span>`;
+      const roleLabel = roleMap[me.role] || me.role;
+      const adminBadge = me.is_admin
+        ? `<span style="display:inline-block;padding:2px 8px;background:#7c3aed22;color:#7c3aed;border-radius:20px;font-weight:700;font-size:10px;margin-left:4px;letter-spacing:.5px">ADMIN</span>`
+        : '';
+      document.getElementById('menu-role').innerHTML =
+        `<span style="display:inline-block;padding:2px 8px;background:var(--primary-10,rgba(37,99,235,.12));color:var(--primary);border-radius:20px;font-weight:600">${roleLabel}</span>${adminBadge}`;
       if (['vp', 'pm', 'lead'].includes(me.role)) {
         document.getElementById('nav-team-section').style.display = '';
+      }
+      if (me.is_admin) {
+        document.getElementById('nav-admin-section').style.display = '';
       }
     } catch(e) { window.location.href = '/login'; }
   })();

@@ -11,9 +11,9 @@ from flask_login import (LoginManager, current_user, login_required,
 
 from database import db
 from models import (Allocation, Approval, AuditLog, Dependency, Project,
-                    Task, Team, User)
-from scheduler import (compute_resource_utilization, find_critical_path,
-                       run_full_schedule)
+                    ProjectAccess, Task, Team, User)
+from scheduler import (compute_delay_impact, compute_resource_utilization,
+                       find_critical_path, run_full_schedule)
 
 
 def create_app(config=None):
@@ -28,7 +28,7 @@ def create_app(config=None):
     db.init_app(app)
 
     login_manager = LoginManager(app)
-    login_manager.login_view = 'auth_login'
+    login_manager.login_view = 'login_page'
 
     @login_manager.user_loader
     def load_user(uid):
@@ -36,6 +36,28 @@ def create_app(config=None):
 
     with app.app_context():
         db.create_all()
+        # Additive migration: add is_admin column if the users table predates it.
+        # SQLite supports ALTER TABLE ADD COLUMN only when a DEFAULT is provided.
+        from sqlalchemy import text
+        with db.engine.connect() as _conn:
+            try:
+                _conn.execute(text('ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0'))
+                _conn.commit()
+            except Exception:
+                pass  # column already exists — safe to ignore
+
+        # Bootstrap: if no admin exists yet, promote the first VP (or first user).
+        if not User.query.filter_by(is_admin=True).first():
+            first_admin = (User.query.filter_by(role='vp').first()
+                           or User.query.order_by(User.id).first())
+            if first_admin:
+                first_admin.is_admin = True
+                db.session.commit()
+
+        # Auto-seed demo data on first run (empty database).
+        if User.query.count() == 0:
+            from db_seed import seed_db
+            seed_db()
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -267,15 +289,110 @@ def create_app(config=None):
     @app.route('/api/projects', methods=['GET'])
     @login_required
     def list_projects():
-        q = Project.query
-        if current_user.role == 'member':
-            assigned_pids = (db.session.query(Task.project_id)
-                             .filter_by(assignee_id=current_user.id).distinct())
-            q = q.filter(
-                (Project.owner_id == current_user.id) | (Project.id.in_(assigned_pids))
-            )
-        projects = q.order_by(Project.updated_at.desc()).all()
+        """
+        Visibility rules (additive — any matching rule grants access):
+          admin / vp  → all projects
+          pm          → projects they own  OR  admin-granted
+          lead        → projects where their team has ≥1 task  OR  admin-granted
+          member      → admin-granted only
+        """
+        if current_user.is_admin or current_user.role == 'vp':
+            projects = Project.query.order_by(Project.updated_at.desc()).all()
+
+        elif current_user.role == 'pm':
+            granted_pids = (db.session.query(ProjectAccess.project_id)
+                            .filter_by(user_id=current_user.id))
+            projects = (Project.query
+                        .filter((Project.owner_id == current_user.id) |
+                                Project.id.in_(granted_pids))
+                        .order_by(Project.updated_at.desc()).all())
+
+        elif current_user.role == 'lead':
+            # teams this user leads → projects that have at least one task in those teams
+            lead_team_ids = (db.session.query(Team.id)
+                             .filter_by(lead_id=current_user.id))
+            team_pids = (db.session.query(Task.project_id)
+                         .filter(Task.team_id.in_(lead_team_ids)).distinct())
+            granted_pids = (db.session.query(ProjectAccess.project_id)
+                            .filter_by(user_id=current_user.id))
+            projects = (Project.query
+                        .filter(Project.id.in_(team_pids) |
+                                Project.id.in_(granted_pids))
+                        .order_by(Project.updated_at.desc()).all())
+
+        else:  # member — only explicit admin grants
+            granted_pids = (db.session.query(ProjectAccess.project_id)
+                            .filter_by(user_id=current_user.id))
+            projects = (Project.query
+                        .filter(Project.id.in_(granted_pids))
+                        .order_by(Project.updated_at.desc()).all())
+
         return jsonify([p.to_dict() for p in projects])
+
+    @app.route('/api/projects/consolidation', methods=['GET'])
+    @login_required
+    def projects_consolidation():
+        """
+        Returns all projects the current user can see, formatted for the
+        portfolio-level Gantt chart (one bar per project, no task dependencies).
+        Uses the same visibility logic as list_projects.
+        """
+        if current_user.is_admin or current_user.role == 'vp':
+            projects = Project.query.order_by(Project.start_date).all()
+        elif current_user.role == 'pm':
+            granted_pids = (db.session.query(ProjectAccess.project_id)
+                            .filter_by(user_id=current_user.id))
+            projects = (Project.query
+                        .filter((Project.owner_id == current_user.id) |
+                                Project.id.in_(granted_pids))
+                        .order_by(Project.start_date).all())
+        elif current_user.role == 'lead':
+            lead_team_ids = (db.session.query(Team.id)
+                             .filter_by(lead_id=current_user.id))
+            team_pids = (db.session.query(Task.project_id)
+                         .filter(Task.team_id.in_(lead_team_ids)).distinct())
+            granted_pids = (db.session.query(ProjectAccess.project_id)
+                            .filter_by(user_id=current_user.id))
+            projects = (Project.query
+                        .filter(Project.id.in_(team_pids) |
+                                Project.id.in_(granted_pids))
+                        .order_by(Project.start_date).all())
+        else:
+            granted_pids = (db.session.query(ProjectAccess.project_id)
+                            .filter_by(user_id=current_user.id))
+            projects = (Project.query
+                        .filter(Project.id.in_(granted_pids))
+                        .order_by(Project.start_date).all())
+
+        today = date.today()
+        result = []
+        for p in projects:
+            start = p.start_date
+            # Use forecast if available and later than target, else use target
+            end = p.current_forecast_date or p.target_date
+            if not start or not end:
+                # Skip projects with no dates — they can't be rendered on a Gantt
+                continue
+            pd = p.to_dict()
+            result.append({
+                'id':           str(p.id),
+                'name':         p.name,
+                'start':        start.isoformat(),
+                'end':          end.isoformat(),
+                'progress':     pd['progress'],
+                'custom_class': f'proj-bar proj-{p.status}',
+                'status':       p.status,
+                'priority':     p.priority,
+                'owner_name':   p.owner.name if p.owner else '',
+                'npd_reference': p.npd_reference or '',
+                'target_date':  p.target_date.isoformat() if p.target_date else None,
+                'forecast_date': p.current_forecast_date.isoformat() if p.current_forecast_date else None,
+                'is_breaching': bool(p.current_forecast_date and p.target_date and
+                                     p.current_forecast_date > p.target_date),
+                'task_count':   pd['task_count'],
+                'completed_task_count': pd['completed_task_count'],
+            })
+        return jsonify(result)
 
     @app.route('/api/projects', methods=['POST'])
     @login_required
@@ -640,6 +757,61 @@ def create_app(config=None):
         critical_ids = find_critical_path(tasks_dict, dep_list, project_end)
         return jsonify({'critical_task_ids': list(critical_ids)})
 
+    @app.route('/api/tasks/<int:tid>/delay-impact', methods=['GET'])
+    @login_required
+    def task_delay_impact(tid):
+        """
+        Simulate delaying task `tid` by ?days=N and return downstream impact.
+        Response: {
+          "delayed_task": {id, title},
+          "extra_days": N,
+          "impact": [{task_id, title, wbs_number, days_slipped, is_critical}]
+        }
+        """
+        task = Task.query.get_or_404(tid)
+        extra_days = int(request.args.get('days', 1))
+        if extra_days < 1:
+            return jsonify({'error': 'days must be >= 1'}), 400
+
+        tasks = Task.query.filter_by(project_id=task.project_id).all()
+        deps  = (Dependency.query
+                 .join(Task, Dependency.predecessor_id == Task.id)
+                 .filter(Task.project_id == task.project_id).all())
+
+        tasks_dict = {t.id: {
+            'start_date':       t.start_date,
+            'end_date':         t.end_date,
+            'duration_days':    t.duration_days or 1,
+            'status':           t.status,
+            'percent_complete': float(t.percent_complete or 0),
+        } for t in tasks}
+        dep_list = [{'predecessor_id': d.predecessor_id,
+                     'successor_id':   d.successor_id,
+                     'dep_type':       d.dep_type,
+                     'lag_days':       d.lag_days or 0} for d in deps]
+
+        impact_map = compute_delay_impact(tasks_dict, dep_list, tid, extra_days)
+
+        task_lookup = {t.id: t for t in tasks}
+        impact_list = []
+        for affected_id, days_slipped in sorted(impact_map.items(),
+                                                key=lambda x: -x[1]):
+            t = task_lookup.get(affected_id)
+            if t:
+                impact_list.append({
+                    'task_id':     t.id,
+                    'title':       t.title,
+                    'wbs_number':  t.wbs_number,
+                    'days_slipped': days_slipped,
+                    'is_critical': t.is_critical,
+                })
+
+        return jsonify({
+            'delayed_task': {'id': task.id, 'title': task.title},
+            'extra_days':   extra_days,
+            'impact':       impact_list,
+        })
+
     # ── audit log ─────────────────────────────────────────────────────────────
 
     @app.route('/api/projects/<int:pid>/audit-log', methods=['GET'])
@@ -657,6 +829,128 @@ def create_app(config=None):
                 .limit(500)
                 .all())
         return jsonify([l.to_dict() for l in logs])
+
+    # ── admin — project visibility control ───────────────────────────────────
+
+    def _admin_required(f):
+        """Decorator: 403 unless current_user.is_admin."""
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            if not current_user.is_authenticated:
+                return jsonify({'error': 'Authentication required'}), 401
+            if not current_user.is_admin:
+                return jsonify({'error': 'Admin access required'}), 403
+            return f(*args, **kwargs)
+        return wrapped
+
+    @app.route('/api/admin/access-matrix', methods=['GET'])
+    @login_required
+    @_admin_required
+    def admin_access_matrix():
+        """
+        Returns the full user × project visibility matrix.
+        For each (user, project) cell the value is:
+          'auto'    — access granted by role rules (VP/PM-own/Lead-team), non-revokable
+          'granted' — admin explicitly granted access via ProjectAccess table
+          'none'    — no access
+        """
+        users    = User.query.order_by(User.name).all()
+        projects = Project.query.order_by(Project.name).all()
+
+        # Collect all explicit grants into a set for O(1) lookup
+        grant_set = {(g.user_id, g.project_id)
+                     for g in ProjectAccess.query.all()}
+
+        # For 'lead' auto-access: build lead_id → set of project_ids
+        # Step 1: team_id → project_ids (projects with ≥1 task in that team)
+        team_project_map = {}
+        for task in Task.query.with_entities(Task.team_id, Task.project_id).all():
+            if task.team_id:
+                team_project_map.setdefault(task.team_id, set()).add(task.project_id)
+        # Step 2: lead_id → union of project_ids from all their teams
+        lead_project_map = {}
+        for team in Team.query.with_entities(Team.id, Team.lead_id).all():
+            if team.lead_id:
+                pids = team_project_map.get(team.id, set())
+                lead_project_map.setdefault(team.lead_id, set()).update(pids)
+
+        all_project_ids = {p.id for p in projects}
+        pm_project_map  = {}  # owner_id → set of project_ids
+        for p in projects:
+            if p.owner_id:
+                pm_project_map.setdefault(p.owner_id, set()).add(p.id)
+
+        access = {}
+        for u in users:
+            row = {}
+            for p in projects:
+                if u.is_admin or u.role == 'vp':
+                    row[p.id] = 'auto'
+                elif u.role == 'pm' and p.id in pm_project_map.get(u.id, set()):
+                    row[p.id] = 'auto'
+                elif u.role == 'lead' and p.id in lead_project_map.get(u.id, set()):
+                    row[p.id] = 'auto'
+                elif (u.id, p.id) in grant_set:
+                    row[p.id] = 'granted'
+                else:
+                    row[p.id] = 'none'
+            access[u.id] = row
+
+        return jsonify({
+            'users':    [u.to_dict()  for u in users],
+            'projects': [p.to_dict()  for p in projects],
+            'access':   access,
+        })
+
+    @app.route('/api/admin/access', methods=['POST'])
+    @login_required
+    @_admin_required
+    def admin_set_access():
+        """
+        Toggle a single (user, project) explicit grant.
+        Body: { user_id, project_id, grant: true|false }
+        Silently ignores attempts to revoke auto-access (role-based) — those
+        are not stored in ProjectAccess and can't be deleted.
+        """
+        data       = request.get_json() or {}
+        user_id    = data.get('user_id')
+        project_id = data.get('project_id')
+        grant      = data.get('grant')
+
+        if user_id is None or project_id is None or grant is None:
+            return jsonify({'error': 'user_id, project_id, and grant are required'}), 400
+
+        User.query.get_or_404(int(user_id))
+        Project.query.get_or_404(int(project_id))
+
+        existing = ProjectAccess.query.filter_by(
+            user_id=int(user_id), project_id=int(project_id)).first()
+
+        if grant:
+            if not existing:
+                db.session.add(ProjectAccess(
+                    user_id=int(user_id),
+                    project_id=int(project_id),
+                    granted_by=current_user.id,
+                ))
+                db.session.commit()
+        else:
+            if existing:
+                db.session.delete(existing)
+                db.session.commit()
+
+        return jsonify({'ok': True})
+
+    @app.route('/api/admin/users/<int:uid>/make-admin', methods=['POST'])
+    @login_required
+    @_admin_required
+    def admin_make_admin(uid):
+        """Toggle is_admin on another user."""
+        user = User.query.get_or_404(uid)
+        data = request.get_json() or {}
+        user.is_admin = bool(data.get('is_admin', False))
+        db.session.commit()
+        return jsonify(user.to_dict())
 
     # ── dashboard ─────────────────────────────────────────────────────────────
 

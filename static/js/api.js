@@ -10,8 +10,11 @@ const API = (() => {
     };
     if (body !== undefined) opts.body = JSON.stringify(body);
     const res = await fetch(url, opts);
-    if (res.status === 401) { window.location.href = '/login'; return; }
     const data = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      if (window.location.pathname !== '/login') { window.location.href = '/login'; return; }
+      throw new Error(data.error || 'Invalid credentials');
+    }
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     return data;
   }
