@@ -2,6 +2,9 @@
 
 A full-stack Project & Resource Management platform built for the V-Guard R&D Electronics division. Manages the entire NPD (New Product Development) lifecycle — from concept through DVT and mass production — with Gantt scheduling, dependency cascade, critical path analysis, and resource utilization tracking.
 
+**Live demo:** https://pm-application.onrender.com
+> Cold starts on the free tier take ~30 seconds. Login: `admin@vguard.in` / `password123`
+
 ---
 
 ## Tech Stack
@@ -18,17 +21,19 @@ A full-stack Project & Resource Management platform built for the V-Guard R&D El
 ## Running Locally
 
 ```bash
-pip install flask flask-login flask-sqlalchemy werkzeug
+pip install -r requirements.txt
 python app.py
 # → http://127.0.0.1:5000
 ```
 
-**Default login:** `admin@vguard.in` / `admin123` (VP / full access)
-
-To seed the database with sample V-Guard project data:
+The database is auto-seeded with demo data on first run. To manually re-seed:
 ```bash
 python seed.py
 ```
+
+**Default login:** `admin@vguard.in` / `password123` (VP / full access)
+
+All demo users share the same password: `password123`
 
 ---
 
@@ -40,7 +45,10 @@ PM Application/
 ├── models.py       — SQLAlchemy ORM models
 ├── scheduler.py    — Scheduling engine (cascade, critical path, delay impact)
 ├── database.py     — DB initialisation
-├── seed.py         — Sample data (4 projects, 15 users, 56 tasks)
+├── db_seed.py      — Seed logic (called automatically on first run)
+├── seed.py         — CLI wrapper: python seed.py to manually re-seed
+├── render.yaml     — Render deployment config
+├── requirements.txt
 ├── templates/
 │   ├── base.html   — Nav, sidebar, user menu
 │   ├── login.html  — Login page
@@ -211,6 +219,38 @@ Simulates adding N days to task `tid` and returns every downstream task with how
 4. Click **"+ Add Task"** to create phases and tasks
 5. In the task drawer (click any task name), click **"+ Add"** under Predecessors to wire up dependencies
 6. Click **Recompute** to propagate the full schedule
+
+---
+
+## Deployment (Render)
+
+The app is configured for one-click deploy to [Render](https://render.com) via `render.yaml`.
+
+### Deploy your own instance
+
+1. Fork / push this repo to GitHub
+2. Go to [render.com](https://render.com) → **New + → Web Service**
+3. Connect your GitHub repo — Render auto-detects `render.yaml`
+4. Click **Apply** — build and deploy takes ~2–3 minutes
+5. Your URL: `https://<service-name>.onrender.com`
+
+### How it works in production
+
+| Concern | Approach |
+|---------|---------|
+| WSGI server | Gunicorn (replaces Flask dev server) |
+| Database | SQLite, stored in container filesystem |
+| First run | `create_app()` auto-seeds all demo data if DB is empty |
+| Re-deploy | SQLite is wiped on each new deploy; auto-seed repopulates it |
+| Secret key | Render generates a random `SECRET_KEY` via `render.yaml` env var |
+| Cold starts | Free tier sleeps after 15 min idle; first request takes ~30s |
+
+### Environment variables (set automatically by render.yaml)
+
+| Variable | Value |
+|----------|-------|
+| `SECRET_KEY` | Auto-generated random value |
+| `PYTHON_VERSION` | `3.11.0` |
 
 ---
 
