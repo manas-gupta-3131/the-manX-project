@@ -1,0 +1,444 @@
+VALUE.TXT — V-Guard R&D PM Application
+Problem Definitions, Value Propositions, and Feature Roadmap
+Last updated: 2026-04-24
+================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 0 — THE GAP THIS DOCUMENT ADDRESSES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+What the system currently does:
+  • Maps tasks → people (assignee_id)
+  • Maps people → teams (team_id on User)
+  • Computes task-level delays and critical path
+  • Computes per-person resource utilization within a single project
+
+What is missing (the core gap):
+  • Teams are NOT modeled as capacity-bearing units
+  • There is no cross-project utilization roll-up
+  • There is no team-level overload signal
+  • There is no "can we take this new project?" decision engine
+  • The VP has no single number to say: "Team X cannot absorb more work"
+
+This document defines those problems and the algorithms to solve them.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — PROBLEMS BEING SOLVED: BY ROLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+────────────────────────────────────────────────────────────────────────────────
+1A. VP OF R&D — Narender Singh Negi (or equivalent)
+────────────────────────────────────────────────────────────────────────────────
+
+PROBLEM 1: Cannot answer NPD's most important question.
+  NPD says: "Can R&D take the 12V 100Ah Lithium battery project, delivery by Q3?"
+  Current answer: gut feel or Excel.
+  What is needed: A number. "Advanced Battery Lab is at 87% utilization through
+  August. This project will push them to 118%. You cannot commit to Q3."
+
+PROBLEM 2: No visibility of which teams are the systemic bottlenecks.
+  The VP sees delays in project timelines but cannot see WHICH team is causing
+  them repeatedly across projects. Delay is visible; the cause is not.
+
+PROBLEM 3: Cannot compare NPD commitment date vs. actual forecast date in one view.
+  Each project has a target date (NPD promise) and a computed forecast date
+  (what the system projects). The VP needs to see the delta across ALL projects
+  at once: "Project A is 18 days behind promise. Project B is on time."
+
+PROBLEM 4: No early warning before a crisis.
+  The VP is told about a delay after it happens. There is no signal at the point
+  when a task slips and all downstream tasks cascade that says:
+  "This slip will breach the NPD commitment date."
+
+────────────────────────────────────────────────────────────────────────────────
+1B. PROJECT MANAGER
+────────────────────────────────────────────────────────────────────────────────
+
+PROBLEM 5: No cross-project load visibility when assigning tasks.
+  A PM assigns Task X to Person A. But Person A is already 100% allocated on
+  Project Y during the same week. The system has no cross-project overload check.
+  The PM only sees utilization within the current project.
+
+PROBLEM 6: Cannot answer "which team should own this task?"
+  When defining tasks, the PM knows the type of work but not which team is
+  currently less loaded. There is no team availability signal at the time of
+  assignment.
+
+PROBLEM 7: No what-if simulation before committing a schedule.
+  If a PM wants to know "what happens to the schedule if Testing takes 3 extra
+  days?", there is already a delay-impact API (compute_delay_impact). But this
+  only simulates one task in one project. A PM cannot simulate: "What if ABL team
+  is already delayed on Project Y — how does that affect my project Z?"
+
+PROBLEM 8: Approval bottlenecks are invisible until they block tasks.
+  Approvals sit in a queue. A task waiting for approval shows status "blocked"
+  but the PM has no view of: "This approval has been pending 8 days; it is now
+  on the critical path."
+
+────────────────────────────────────────────────────────────────────────────────
+1C. R&D TEAM MEMBER
+────────────────────────────────────────────────────────────────────────────────
+
+PROBLEM 9: No unified priority queue across projects.
+  A member may have tasks on 3 different projects due this week. They have to
+  check 3 project pages. There is no "my work this week" view that ranks tasks
+  by deadline, criticality, and dependency urgency.
+
+PROBLEM 10: No visibility into why a deadline was moved.
+  A task's date changes. The member sees a new date but not why. The audit log
+  exists but is not surfaced as a notification to the member.
+
+PROBLEM 11: No signal when their own delay is about to hurt someone else.
+  If a member is 30% done on a task that is 50% of the way through its window,
+  the system can compute they are behind. But this is not communicated to them.
+  They do not know they are on the critical path.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — FEATURES TO BUILD (ALGORITHMIC DEFINITIONS)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Each feature below is defined by the math it runs, the input it needs, and the
+decision it enables. No UI discussion here — only logic.
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE 1: TEAM CAPACITY ENGINE  [solves Problems 1, 2, 5, 6]
+────────────────────────────────────────────────────────────────────────────────
+
+Purpose: Treat a team as a capacity-bearing unit, not just a label.
+
+Data model addition needed:
+  Team already exists. Add to User: capacity_hours_per_day (already exists).
+
+Algorithm:
+
+  team_capacity(team_id, date_start, date_end):
+    members = Users where team_id = team_id
+    working_days = count of weekdays in [date_start, date_end]
+    return Σ member.capacity_hours_per_day × working_days
+    → Unit: total person-hours available in the window
+
+  team_load(team_id, date_start, date_end):
+    tasks = all Tasks assigned to any member of team_id
+            where task date range intersects [date_start, date_end]
+    for each task:
+      overlap_days = min(task.end, date_end) - max(task.start, date_start) + 1
+      load += overlap_days × assignee.capacity_hours_per_day × allocation_percent / 100
+    return load
+    → Unit: person-hours committed in the window
+
+  team_utilization(team_id, date_start, date_end):
+    return team_load / team_capacity × 100
+    → Unit: %
+
+Thresholds (configurable, defaults):
+  < 60% → Available (can absorb new work)
+  60–80% → At Risk (marginal capacity)
+  > 80% → Overloaded (cannot reliably take more)
+
+Note: This is a CROSS-PROJECT calculation. Every task from every project assigned
+to members of this team contributes to the load. This is the fundamental unit
+that was missing.
+
+Output this as a weekly time series so the VP can see load by week for each team.
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE 2: PROJECT INTAKE FEASIBILITY SCORING  [solves Problem 1]
+────────────────────────────────────────────────────────────────────────────────
+
+Purpose: Answer "can we take this new NPD project?" with a number, not a guess.
+
+When the PM or VP creates a new project with:
+  - Proposed start date, end date
+  - Required teams (T1, T2, ..., Tn)
+  - Estimated effort per team (in person-days — PM inputs this)
+
+The system runs:
+
+  For each required team Ti:
+    current_util = team_utilization(Ti, proposed_start, proposed_end)
+    new_load = estimated_person_days_for_Ti / team_capacity(Ti, proposed_start, proposed_end) × 100
+    projected_util = current_util + new_load
+
+    if projected_util > 80%:
+      flag Ti as OVERLOADED if accepted
+    elif projected_util > 60%:
+      flag Ti as AT RISK if accepted
+    else:
+      flag Ti as OK
+
+  feasibility_verdict:
+    if any team OVERLOADED → CANNOT COMMIT (with specific team name + numbers)
+    if any team AT RISK    → CONDITIONAL (with risk-ranked team list)
+    if all OK              → CAN COMMIT
+
+Output to the VP: one card per required team showing current load, projected
+load if accepted, and the recommendation. This is the "buffer zone calculator"
+for R&D's intake decisions.
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE 3: TEAM OVERLOAD HEATMAP  [solves Problem 2]
+────────────────────────────────────────────────────────────────────────────────
+
+Purpose: Give the VP a single visual where rows = teams, columns = weeks, and
+each cell = utilization%. Not a UI problem — the data structure is the feature.
+
+Algorithm:
+
+  heatmap_data(team_ids, date_start, date_end):
+    weeks = split [date_start, date_end] into ISO weeks
+    for each team T in team_ids:
+      for each week W:
+        cell[T][W] = team_utilization(T, W.start, W.end)
+    return cell[][]
+
+This is the core VP dashboard signal. A team consistently at >80% for 6 weeks
+is a systemic problem, not a one-time spike. The VP can see this at a glance.
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE 4: NPD COMMITMENT GAP TRACKER  [solves Problem 3]
+────────────────────────────────────────────────────────────────────────────────
+
+Purpose: Show the VP how far each project is from its promised NPD delivery date.
+
+This uses data already in the system (target_date and current_forecast_date on
+the Project model). The algorithm is simple:
+
+  commitment_gap(project):
+    return current_forecast_date - target_date
+    → positive = behind, negative = ahead, zero = on track
+
+  portfolio_health():
+    for each active project:
+      gap = commitment_gap(project)
+      if gap > 0: at_risk_count++, total_slip_days += gap
+    return {
+      on_track: [projects where gap <= 0],
+      at_risk:  [projects sorted by gap descending],
+      avg_slip: total_slip_days / at_risk_count
+    }
+
+The VP sees: "7 of 12 projects are on track. 5 are at risk. Average slip: 14 days.
+Worst case: Project Alpha is 31 days behind NPD commitment."
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE 5: CROSS-PROJECT PERSON OVERLOAD DETECTION  [solves Problem 5]
+────────────────────────────────────────────────────────────────────────────────
+
+Purpose: Detect when a person is allocated >100% across multiple projects on the
+same day — something the current single-project utilization misses.
+
+Algorithm:
+
+  person_overload(user_id, date_start, date_end):
+    all_tasks = Tasks assigned to user_id across ALL projects
+    for each date D in [date_start, date_end]:
+      daily_load[D] = Σ allocation_percent for tasks spanning D
+      if daily_load[D] > 100: flag as OVERLOADED on date D
+
+  overloaded_people():
+    for each user:
+      check person_overload for the next 90 days
+    return list of {user, peak_overload_date, peak_load_percent}
+
+This is a PM guardrail. When assigning a task to Person A, the system checks if
+A will breach 100% on any day during the task window. If yes, warn the PM.
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE 6: APPROVAL AGING ON CRITICAL PATH  [solves Problem 8]
+────────────────────────────────────────────────────────────────────────────────
+
+Purpose: Surface approvals that are pending AND blocking critical-path tasks.
+
+Algorithm:
+
+  critical_pending_approvals(project_id):
+    pending = Approvals where status = 'pending' and task.project_id = project_id
+    for each approval A:
+      task = A.task
+      age_days = today - A.created_at
+      is_blocking_critical = task.is_critical AND task.status = 'blocked'
+      urgency_score = age_days × (2 if is_blocking_critical else 1)
+    return sorted by urgency_score descending
+
+Output: "Approval from Narender Singh Negi on Task 'DVT Sign-off' has been
+pending 12 days. This task is on the critical path. Project will slip 1 day for
+every additional day of delay."
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE 7: MEMBER PRIORITY QUEUE  [solves Problem 9, 11]
+────────────────────────────────────────────────────────────────────────────────
+
+Purpose: Give each member a ranked to-do list across all their projects.
+
+Algorithm:
+
+  member_priority_queue(user_id):
+    tasks = all incomplete Tasks assigned to user_id across all projects
+    for each task T:
+      urgency = compute urgency score:
+        base = 100
+        if T.is_critical: base += 50
+        days_to_deadline = (T.computed_end - today).days
+        if days_to_deadline <= 0: urgency += 100   (overdue)
+        elif days_to_deadline <= 3: urgency += 60
+        elif days_to_deadline <= 7: urgency += 30
+        completion_velocity = T.percent_complete / elapsed_days_since_start
+        expected_velocity = 100 / T.duration_days
+        if completion_velocity < expected_velocity × 0.8:
+          urgency += 40  (member is falling behind on this task)
+      T.priority_score = urgency
+    return sorted by priority_score descending
+
+This directly tells the member: "Do Task A first, then Task B." And for Task A
+it shows: "You are behind pace. Expected 60% done by now, you are at 35%."
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE 8: DELAY EARLY WARNING SYSTEM  [solves Problems 4, 11]
+────────────────────────────────────────────────────────────────────────────────
+
+Purpose: Detect a task that is falling behind before it actually misses its date.
+
+Algorithm (run daily, server-side):
+
+  For each in-progress task T:
+    elapsed = (today - T.start_date).days + 1
+    expected_pct = elapsed / T.duration_days × 100
+    actual_pct = T.percent_complete
+    pace_deficit = expected_pct - actual_pct
+
+    if pace_deficit > 20%:  (member is more than 20 percentage points behind)
+      days_at_risk = pace_deficit / 100 × T.duration_days
+      flag as AT_RISK, days_at_risk = ceil(days_at_risk)
+      if T.is_critical:
+        notify PM and VP: "Task X is tracking {days_at_risk} days late.
+                           It is on the critical path. Project forecast will slip."
+      else:
+        float_remaining = T.latest_start - today
+        if days_at_risk > float_remaining:
+          escalate: task will consume its float and become critical
+
+This is predictive, not reactive. The VP and PM are warned while there is still
+time to act.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — WHAT THE SYSTEM WILL BE ABLE TO SAY AFTER THESE FEATURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+To the VP when NPD brings a new project request:
+  "Advanced Battery Lab is currently at 83% utilization through September.
+   Adding the 12V Lithium project will push them to 116% in July and August.
+   You cannot commit to the Q3 deadline without either deferring Project Omega
+   or adding headcount to ABL."
+
+To the VP during a portfolio review:
+  "5 of 12 active projects are behind NPD commitment. The common bottleneck is
+   the Part Approval team, which is at 91% average load for the next 8 weeks
+   across 7 projects. Every project that requires part approval is at risk."
+
+To a Project Manager assigning a task:
+  "Ravi Kumar is already allocated 100% on Project Delta next week.
+   Assigning him to this task will create a conflict on 6 days."
+
+To a Project Manager during planning:
+  "Approval from [approver] on DVT Sign-off has been pending 9 days and is now
+   on the critical path. Each additional day of delay pushes project end by 1 day."
+
+To a Team Member at the start of the day:
+  "Your highest-priority task is Battery Cell Discharge Test. You are 35% done
+   but should be 60% done by now. This task is on the critical path. Any further
+   slip will directly delay the project."
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — BUILD SEQUENCE (PRIORITY ORDER)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Priority is determined by: which problem is most painful AND which feature
+unlocks other features.
+
+Priority 1 — Team Capacity Engine (Feature 1)
+  Why first: Every other feature depends on team load calculation.
+  Unblocks: Features 2, 3, 6.
+  Backend only: add compute_team_utilization() to scheduler.py.
+  New API endpoint: GET /api/teams/<tid>/utilization?start=&end=
+  New API endpoint: GET /api/portfolio/team-heatmap
+
+Priority 2 — Cross-Project Person Overload Detection (Feature 5)
+  Why second: Most immediate PM pain. Currently invisible.
+  Backend: extend compute_resource_utilization to query all projects.
+  New API endpoint: GET /api/users/<uid>/overload?start=&end=
+  Hook into task assignment: run check on POST /api/projects/<pid>/tasks
+
+Priority 3 — NPD Commitment Gap Tracker (Feature 4)
+  Why third: Pure computation on existing data (target_date vs forecast).
+  Zero new data model changes needed.
+  Extend GET /api/dashboard to include commitment_gap per project.
+
+Priority 4 — Project Intake Feasibility Scoring (Feature 2)
+  Why fourth: Highest VP value but needs Feature 1 to be accurate.
+  New API endpoint: POST /api/projects/intake-check (body: teams + effort estimates)
+
+Priority 5 — Delay Early Warning System (Feature 8)
+  Why fifth: Needs daily execution. Implement as a background job.
+  Output: new "alerts" table in DB with {entity_type, entity_id, severity, message}.
+  New API endpoint: GET /api/alerts (returns active warnings for current user's scope)
+
+Priority 6 — Approval Aging on Critical Path (Feature 6)
+  Extend existing approval data with urgency scoring.
+  Extend GET /api/dashboard to surface critical pending approvals.
+
+Priority 7 — Member Priority Queue (Feature 7)
+  New API endpoint: GET /api/users/me/priority-queue
+  Compute on request (no persistence needed; recalculates each call).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — DATA MODEL CHANGES NEEDED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+All existing models stay. The additions are minimal.
+
+  1. Team model:
+     Add: capacity_override_hours_per_day (nullable float)
+       → If set, overrides sum of member capacities for the team.
+       → Useful for teams that are partially available to this project.
+
+  2. Project model:
+     Add: required_teams (JSON array of team_ids + estimated_person_days each)
+       → Used by intake feasibility scoring.
+       → Can be entered at project creation time by the PM.
+
+  3. New: Alert table
+     {id, entity_type, entity_id, severity (info/warning/critical),
+      message, created_at, dismissed_at, visible_to_role}
+     → Written by the early warning engine.
+     → Read by the dashboard per user's role scope.
+
+  4. Allocation model (already exists):
+     Ensure allocation_percent is always set (default 100).
+     This is the weight used in team_load calculation.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — WHAT IS EXPLICITLY NOT BEING SOLVED HERE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+These are real problems but out of scope for now. Not ignored — deferred.
+
+  - Skill-based task assignment (matching task requirements to person skills)
+  - Automatic resource rebalancing (system moves tasks to less-loaded people)
+  - ERP / NPD system integration (automated project ingestion from NPD tools)
+  - Financial tracking (budget vs. actual cost per project or team)
+  - External dependency tracking (vendor timelines, procurement delays)
+
+The system today, plus the 7 features above, answers the core question:
+"Can R&D take more work, and if not, which team is the reason?"
+That is the primary decision the VP needs to make, and it is currently unmade
+with any data backing.
+
+================================================================================
+End of value.txt
+================================================================================

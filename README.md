@@ -18,22 +18,84 @@ A full-stack Project & Resource Management platform built for the V-Guard R&D El
 
 ---
 
-## Running Locally
+## Setup & Running Locally
+
+### Prerequisites
+
+- Python 3.10 or higher (`python --version` to check)
+- pip (comes with Python)
+- Git
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/manas-gupta-3131/the-manX-project.git
+cd the-manX-project
+```
+
+### 2. Create a virtual environment (recommended)
+
+```bash
+# Windows
+python -m venv venv
+venv\Scripts\activate
+
+# macOS / Linux
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### 3. Install dependencies
 
 ```bash
 pip install -r requirements.txt
-python app.py
-# → http://127.0.0.1:5000
 ```
 
-The database is auto-seeded with demo data on first run. To manually re-seed:
+### 4. Run the development server
+
+```bash
+python app.py
+```
+
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000) in your browser.
+
+The database is created and **auto-seeded with demo data on the very first run** — no extra step needed.
+
+### 5. Log in
+
+Use any account from the table below. All passwords are `password123`.
+
+| Email | Role | Access level |
+|-------|------|-------------|
+| `admin@vguard.in` | VP (Admin) | Full access — all projects, teams, users |
+| `priya.nair@vguard.in` | PM | Owns Smart Energy Meter & Voltage Stabilizer |
+| `arjun.mehta@vguard.in` | PM | Owns IoT Gateway & Solar Charge Controller |
+| `kavitha.reddy@vguard.in` | Team Lead | Hardware Design team |
+| `suresh.pillai@vguard.in` | Team Lead | Firmware & Embedded team |
+| `deepa.krishnan@vguard.in` | Team Lead | Software & Cloud team |
+| `vikram.rao@vguard.in` | Member | Hardware Design — individual contributor |
+| `kiran.patel@vguard.in` | Member | Firmware & Embedded — individual contributor |
+
+### Re-seeding the database
+
+To wipe all data and reload the demo dataset from scratch:
+
 ```bash
 python seed.py
 ```
 
-**Default login:** `admin@vguard.in` / `password123` (VP / full access)
+### Changing the secret key
 
-All demo users share the same password: `password123`
+For local development the default key in `app.py` is fine. For any shared or production deployment set the `SECRET_KEY` environment variable:
+
+```bash
+# Windows PowerShell
+$env:SECRET_KEY = "your-random-secret-here"
+python app.py
+
+# macOS / Linux
+SECRET_KEY="your-random-secret-here" python app.py
+```
 
 ---
 
